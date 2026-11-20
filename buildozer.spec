@@ -7,7 +7,7 @@ source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,txt
 source.include_patterns = src/*.py,src/__init__.py
 
-version = 0.1.0
+version = 0.1.1
 # Hanya python3 dan kivy (tanpa pin versi kivy — p4a pakai recipe bawaan v2.3.0)
 requirements = python3,kivy
 

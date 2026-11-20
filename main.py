@@ -4,14 +4,22 @@ IP Setter CCTV (Trial) — aplikasi Android untuk mendeteksi perangkat
 Hikvision / EZVIZ di jaringan lokal (protokol SADP) dan mengubah
 parameter jaringannya (DHCP / IP statis) langsung dari HP, tanpa PC.
 
+Perangkat BEDA SEGMEN IP tetap terdeteksi selama masih satu jaringan
+fisik / Wi-Fi yang sama (satu domain broadcast) — sama seperti CCTV
+Scanner; yang tidak bisa hanya bila terpisah router/VLAN.
+
 VERSI PERCOBAAN: berlaku sampai 20 Januari 2027 (lihat src/legal.py).
 Aplikasi independen — bukan produk resmi Hikvision/EZVIZ.
+
+Tampilan meniru CCTV Scanner: tema gelap #1a1a2e, kartu #16213e,
+aksen cyan #00d4ff, tombol SCAN biru / STOP merah.
 """
 
 import threading
 
 from kivy.app import App
 from kivy.clock import Clock
+from kivy.metrics import dp
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.checkbox import CheckBox
@@ -20,24 +28,151 @@ from kivy.uix.label import Label
 from kivy.uix.popup import Popup
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.textinput import TextInput
+from kivy.utils import get_color_from_hex
+from kivy.core.window import Window
 
 from src import legal
 from src import sadp_net
 
+Window.clearcolor = get_color_from_hex('#1a1a2e')
 
-def _wrapped_label(text, **kwargs):
-    """Label yang membungkus teks dan menyesuaikan tingginya sendiri."""
-    lbl = Label(text=text, size_hint_y=None, halign='left', valign='top',
-                **kwargs)
-    lbl.bind(width=lambda s, w: s.setter('text_size')(s, (w, None)))
-    lbl.bind(texture_size=lambda s, ts: s.setter('height')(s, ts[1]))
+
+def make_label(text, font_size='13sp', color='#e0e0e0', bold=False,
+               height=None, markup=False):
+    lbl = Label(
+        text=text,
+        markup=markup,
+        font_size=font_size,
+        bold=bold,
+        size_hint_y=None,
+        height=height if height else dp(24),
+        color=get_color_from_hex(color),
+        halign='left',
+        valign='middle',
+    )
+    lbl.bind(width=lambda inst, w: setattr(inst, 'text_size', (w, None)))
+    lbl.bind(texture_size=lambda inst, ts: setattr(inst, 'height', max(dp(24), ts[1])))
     return lbl
+
+
+def make_input(text='', hint='', is_passwd=False):
+    return TextInput(
+        text=text,
+        hint_text=hint,
+        multiline=False,
+        password=is_passwd,
+        size_hint_y=None,
+        height=dp(46),
+        font_size='14sp',
+        background_color=get_color_from_hex('#0f3460'),
+        foreground_color=get_color_from_hex('#ffffff'),
+        hint_text_color=get_color_from_hex('#888888'),
+        cursor_color=get_color_from_hex('#00d4ff'),
+        padding=[dp(10), dp(12), dp(10), dp(6)],
+    )
 
 
 def _disclaimer_scroll():
     scroll = ScrollView(size_hint=(1, 1))
-    scroll.add_widget(_wrapped_label(legal.DISCLAIMER_TEXT))
+    scroll.add_widget(make_label(legal.DISCLAIMER_TEXT, font_size='12sp',
+                                 color='#e0e0e0'))
     return scroll
+
+
+class DeviceCard(BoxLayout):
+    """Kartu perangkat — gaya sama persis dengan DeviceCard CCTV Scanner."""
+
+    def __init__(self, device, on_edit=None, **kwargs):
+        super().__init__(**kwargs)
+        self.orientation = 'vertical'
+        self.padding = [dp(10), dp(8), dp(10), dp(8)]
+        self.spacing = dp(4)
+        self.size_hint_y = None
+
+        from kivy.graphics import Color, RoundedRectangle
+        with self.canvas.before:
+            Color(*get_color_from_hex('#16213e'))
+            self.rect = RoundedRectangle(pos=self.pos, size=self.size,
+                                         radius=[dp(8)])
+        self.bind(pos=self._update_rect, size=self._update_rect)
+
+        ip = device.get('ip') or '-'
+        self.add_widget(make_label(
+            text=f'[b][color=00d4ff]● {ip}[/color][/b]',
+            font_size='16sp', markup=True, height=dp(28),
+        ))
+        self.add_widget(make_label(
+            text='[b][color=f39c12]⚡ SADP/UDP[/color][/b]',
+            font_size='11sp', markup=True, color='#f39c12',
+        ))
+        self.add_widget(make_label(
+            text=f"[b]Model:[/b]  {device.get('model') or '-'}",
+            font_size='13sp', markup=True, color='#cccccc',
+        ))
+        if device.get('mac'):
+            self.add_widget(make_label(
+                text=f"[b]MAC:[/b]  {device['mac']}",
+                font_size='12sp', markup=True, color='#aaaaaa',
+            ))
+        if device.get('serial'):
+            self.add_widget(make_label(
+                text=f"[b]Serial:[/b]  {device['serial']}",
+                font_size='12sp', markup=True, color='#aaaaaa',
+            ))
+
+        dhcp = device.get('dhcp')
+        if dhcp is True:
+            dhcp_txt = '[b]DHCP:[/b]  [color=90ee90]Aktif[/color]'
+        elif dhcp is False:
+            dhcp_txt = '[b]DHCP:[/b]  [color=f39c12]Nonaktif (IP statis)[/color]'
+        else:
+            dhcp_txt = '[b]DHCP:[/b]  tidak diketahui'
+        self.add_widget(make_label(
+            text=dhcp_txt, font_size='12sp', markup=True, color='#e0e0e0',
+        ))
+        net_bits = []
+        if device.get('mask'):
+            net_bits.append(f"Mask: {device['mask']}")
+        if device.get('gateway'):
+            net_bits.append(f"GW: {device['gateway']}")
+        if net_bits:
+            self.add_widget(make_label(
+                text='     '.join(net_bits),
+                font_size='12sp', markup=True, color='#aaaaaa',
+            ))
+        if device.get('firmware'):
+            self.add_widget(make_label(
+                text=f"[b]Firmware:[/b]  {device['firmware']}",
+                font_size='11sp', markup=True, color='#888888',
+            ))
+
+        edit_btn = Button(
+            text='Ubah IP / DHCP',
+            font_size='13sp',
+            size_hint_y=None,
+            height=dp(38),
+            background_color=get_color_from_hex('#e67e22'),
+            color=get_color_from_hex('#ffffff'),
+        )
+        if on_edit is not None:
+            edit_btn.bind(on_release=lambda *_: on_edit(device))
+        self.add_widget(edit_btn)
+
+        self.bind(minimum_height=self._set_height)
+        self.height = self._calc_min_height()
+
+    def _calc_min_height(self):
+        total = self.padding[1] + self.padding[3]
+        for child in self.children:
+            total += child.height + self.spacing
+        return max(total, dp(100))
+
+    def _set_height(self, instance, value):
+        self.height = value + self.padding[1] + self.padding[3]
+
+    def _update_rect(self, *args):
+        self.rect.pos = self.pos
+        self.rect.size = self.size
 
 
 class IPSetterApp(App):
@@ -64,30 +199,49 @@ class IPSetterApp(App):
         self.root_box.clear_widgets()
         self.root_box.add_widget(layout)
 
+    @staticmethod
+    def _screen_box():
+        return BoxLayout(orientation='vertical',
+                         padding=[dp(12), dp(16), dp(12), dp(10)],
+                         spacing=dp(8))
+
     # ── Layar masa percobaan berakhir ────────────────────────────────────
     def _show_expired(self):
-        box = BoxLayout(orientation='vertical', padding=16, spacing=12)
-        box.add_widget(_wrapped_label(
-            '[b]Masa Percobaan Berakhir[/b]', markup=True))
-        box.add_widget(_wrapped_label(
+        box = self._screen_box()
+        box.add_widget(make_label('Masa Percobaan Berakhir',
+                                  font_size='18sp', bold=True,
+                                  color='#f39c12', height=dp(32)))
+        box.add_widget(make_label(
             'Versi percobaan aplikasi ini berlaku sampai '
             f'{legal.EXPIRY_TEXT} dan sekarang sudah berakhir, sehingga '
             'aplikasi tidak dapat digunakan lagi.\n\n'
-            'Terima kasih sudah mencoba.'))
-        btn = Button(text='Lihat Disclaimer', size_hint_y=None, height=48)
+            'Terima kasih sudah mencoba.', font_size='13sp'))
+        btn = Button(text='Lihat Disclaimer', size_hint_y=None,
+                     height=dp(48), font_size='14sp',
+                     background_color=get_color_from_hex('#0f3460'),
+                     color=get_color_from_hex('#ffffff'))
         btn.bind(on_release=lambda *_: self._show_disclaimer_popup())
         box.add_widget(btn)
         self._swap(box)
 
     # ── Gerbang disclaimer (pertama kali) ────────────────────────────────
     def _show_disclaimer_gate(self):
-        box = BoxLayout(orientation='vertical', padding=12, spacing=10)
-        box.add_widget(Label(
-            text='IP Setter CCTV — Versi Percobaan',
-            size_hint_y=None, height=32))
+        box = self._screen_box()
+        title = Label(
+            text='[b][color=00d4ff]IP Setter CCTV[/color][/b]',
+            markup=True, font_size='22sp', size_hint_y=None,
+            height=dp(44), halign='center', valign='middle')
+        title.bind(width=lambda inst, w: setattr(inst, 'text_size', (w, None)))
+        box.add_widget(title)
+        box.add_widget(make_label('Versi Percobaan — Disclaimer',
+                                  font_size='13sp', bold=True,
+                                  color='#f39c12'))
         box.add_widget(_disclaimer_scroll())
         btn = Button(text='Saya Mengerti dan Setuju',
-                     size_hint_y=None, height=52)
+                     size_hint_y=None, height=dp(52), font_size='15sp',
+                     bold=True,
+                     background_color=get_color_from_hex('#007bff'),
+                     color=get_color_from_hex('#ffffff'))
         btn.bind(on_release=self._on_accept_disclaimer)
         box.add_widget(btn)
         self._swap(box)
@@ -101,49 +255,98 @@ class IPSetterApp(App):
             self._show_main()
 
     def _show_disclaimer_popup(self):
-        box = BoxLayout(orientation='vertical', padding=8, spacing=8)
+        box = BoxLayout(orientation='vertical', padding=dp(8),
+                        spacing=dp(8))
         box.add_widget(_disclaimer_scroll())
-        btn = Button(text='Tutup', size_hint_y=None, height=48)
+        btn = Button(text='Tutup', size_hint_y=None, height=dp(48),
+                     font_size='14sp',
+                     background_color=get_color_from_hex('#6c757d'),
+                     color=get_color_from_hex('#ffffff'))
         box.add_widget(btn)
         popup = Popup(title='Disclaimer', content=box,
-                      size_hint=(0.95, 0.9))
+                      size_hint=(0.95, 0.9),
+                      background_color=get_color_from_hex('#16213e'))
         btn.bind(on_release=popup.dismiss)
         popup.open()
 
     # ── Layar utama ──────────────────────────────────────────────────────
     def _show_main(self):
-        box = BoxLayout(orientation='vertical', padding=10, spacing=8)
+        box = self._screen_box()
+
+        header = Label(
+            text='[b][color=00d4ff]IP Setter CCTV[/color][/b]',
+            markup=True, font_size='22sp', size_hint_y=None,
+            height=dp(40), halign='center', valign='middle')
+        header.bind(width=lambda inst, w: setattr(inst, 'text_size', (w, None)))
+        box.add_widget(header)
+        subtitle = Label(
+            text='Deteksi & Ubah IP Hikvision / EZVIZ',
+            font_size='13sp', size_hint_y=None, height=dp(22),
+            color=get_color_from_hex('#cccccc'),
+            halign='center', valign='middle')
+        subtitle.bind(width=lambda inst, w: setattr(inst, 'text_size', (w, None)))
+        box.add_widget(subtitle)
+
         days = self.trial['days_left']
-        box.add_widget(Label(
-            text='IP Setter CCTV — Deteksi & Ubah IP Hikvision/EZVIZ',
-            size_hint_y=None, height=30))
-        box.add_widget(Label(
+        trial_lbl = Label(
             text=(f'Versi percobaan s/d {legal.EXPIRY_TEXT} '
-                  f'(sisa {days} hari)'),
-            size_hint_y=None, height=22))
+                  f'• sisa {days} hari'),
+            font_size='12sp', size_hint_y=None, height=dp(22),
+            color=get_color_from_hex('#f39c12'),
+            halign='center', valign='middle')
+        trial_lbl.bind(width=lambda inst, w: setattr(inst, 'text_size', (w, None)))
+        box.add_widget(trial_lbl)
 
-        row = BoxLayout(orientation='horizontal', size_hint_y=None,
-                        height=52, spacing=8)
-        self.scan_btn = Button(text='SCAN')
+        btn_row = BoxLayout(orientation='horizontal', size_hint_y=None,
+                            height=dp(54), spacing=dp(8))
+        self.scan_btn = Button(
+            text='🔍  SCAN', font_size='18sp', bold=True,
+            background_color=get_color_from_hex('#007bff'),
+            color=get_color_from_hex('#ffffff'), size_hint_x=0.65)
         self.scan_btn.bind(on_release=lambda *_: self.start_scan())
-        self.stop_btn = Button(text='STOP', disabled=True)
+        self.stop_btn = Button(
+            text='■  STOP', font_size='15sp',
+            background_color=get_color_from_hex('#dc3545'),
+            color=get_color_from_hex('#ffffff'), disabled=True,
+            size_hint_x=0.35)
         self.stop_btn.bind(on_release=lambda *_: self.stop_scan())
-        disc_btn = Button(text='Disclaimer')
-        disc_btn.bind(on_release=lambda *_: self._show_disclaimer_popup())
-        row.add_widget(self.scan_btn)
-        row.add_widget(self.stop_btn)
-        row.add_widget(disc_btn)
-        box.add_widget(row)
+        btn_row.add_widget(self.scan_btn)
+        btn_row.add_widget(self.stop_btn)
+        box.add_widget(btn_row)
 
-        self.status_label = _wrapped_label(
-            'Tekan SCAN untuk mencari perangkat Hikvision/EZVIZ di '
-            'jaringan ini. HP harus tersambung ke Wi-Fi/LAN yang sama '
-            'dengan perangkat (satu domain broadcast).')
+        disc_btn = Button(
+            text='Disclaimer', size_hint_y=None, height=dp(36),
+            font_size='12sp',
+            background_color=get_color_from_hex('#0f3460'),
+            color=get_color_from_hex('#ffffff'))
+        disc_btn.bind(on_release=lambda *_: self._show_disclaimer_popup())
+        box.add_widget(disc_btn)
+
+        self.status_label = Label(
+            text=('Tekan 🔍 SCAN untuk mencari perangkat '
+                  'Hikvision/EZVIZ. Perangkat beda segmen IP tetap '
+                  'terdeteksi selama masih satu jaringan fisik/Wi-Fi '
+                  'yang sama — sama seperti CCTV Scanner.'),
+            font_size='12sp', size_hint_y=None, height=dp(22),
+            color=get_color_from_hex('#aaaaaa'),
+            halign='left', valign='middle')
+        self.status_label.bind(
+            width=lambda inst, w: setattr(inst, 'text_size', (w, None)),
+            texture_size=lambda inst, ts: setattr(inst, 'height', max(dp(22), ts[1])))
         box.add_widget(self.status_label)
 
+        self.found_label = Label(
+            text='Perangkat ditemukan: 0',
+            font_size='13sp', bold=True, size_hint_y=None, height=dp(24),
+            color=get_color_from_hex('#00d4ff'),
+            halign='left', valign='middle')
+        self.found_label.bind(
+            width=lambda inst, w: setattr(inst, 'text_size', (w, None)))
+        box.add_widget(self.found_label)
+
         scroll = ScrollView(size_hint=(1, 1))
-        self.cards_box = GridLayout(cols=1, size_hint_y=None, spacing=8,
-                                    padding=(0, 4))
+        self.cards_box = GridLayout(cols=1, size_hint_y=None,
+                                    spacing=dp(8), padding=(0, dp(4)))
         self.cards_box.bind(
             minimum_height=self.cards_box.setter('height'))
         scroll.add_widget(self.cards_box)
@@ -161,9 +364,10 @@ class IPSetterApp(App):
         self.scanning = True
         self.devices = {}
         self.cards_box.clear_widgets()
+        self.found_label.text = 'Perangkat ditemukan: 0'
         self.scan_btn.disabled = True
         self.stop_btn.disabled = False
-        self.status_label.text = 'Memindai jaringan (SADP)…'
+        self.status_label.text = '🔍 Memindai jaringan (SADP)…'
         self.stop_event = threading.Event()
         worker = threading.Thread(target=self._scan_worker, daemon=True)
         worker.start()
@@ -189,12 +393,14 @@ class IPSetterApp(App):
         lock = info.get('lock', {})
         lock_txt = 'OK' if lock.get('multicast') else '—'
         if info.get('error'):
-            self.status_label.text = f"Pemindaian gagal: {info['error']}"
+            self.status_label.text = f"❌ Pemindaian gagal: {info['error']}"
         elif count == 0:
             self.status_label.text = (
                 f'Selesai: 0 perangkat ditemukan | RX {info.get("rx", 0)} '
-                f'| MLock {lock_txt}. Pastikan perangkat menyala dan satu '
-                'jaringan lokal dengan HP.')
+                f'| MLock {lock_txt}. Pastikan perangkat menyala dan '
+                'tersambung ke jaringan fisik/Wi-Fi yang sama dengan HP '
+                '(beda segmen IP tidak masalah; yang tidak bisa hanya '
+                'bila terpisah router/VLAN).')
         else:
             self.status_label.text = (
                 f'Selesai: {count} perangkat ditemukan | '
@@ -207,56 +413,35 @@ class IPSetterApp(App):
         if key in self.devices:
             return
         self.devices[key] = dev
-        dhcp = dev.get('dhcp')
-        if dhcp is True:
-            dhcp_txt = 'DHCP: Aktif'
-        elif dhcp is False:
-            dhcp_txt = 'DHCP: Nonaktif (IP statis)'
-        else:
-            dhcp_txt = 'DHCP: tidak diketahui'
-        lines = [
-            f"[b]{dev.get('model') or 'Perangkat Hikvision/EZVIZ'}[/b]",
-            f"IP: {dev.get('ip') or '-'}    MAC: {dev.get('mac') or '-'}",
-            f"Serial: {dev.get('serial') or '-'}",
-            dhcp_txt + (f"    Mask: {dev.get('mask')}" if dev.get('mask') else '')
-            + (f"    GW: {dev.get('gateway')}" if dev.get('gateway') else ''),
-        ]
-        if dev.get('firmware'):
-            lines.append(f"Firmware: {dev['firmware']}")
-        card = BoxLayout(orientation='vertical', size_hint_y=None,
-                         height=168, padding=8, spacing=4)
-        card.add_widget(_wrapped_label('\n'.join(lines), markup=True))
-        btn = Button(text='Ubah IP / DHCP', size_hint_y=None, height=46)
-        btn.bind(on_release=lambda *_a, d=dev: self._open_network_popup(d))
-        card.add_widget(btn)
+        card = DeviceCard(dev, on_edit=self._open_network_popup)
         self.cards_box.add_widget(card)
+        self.found_label.text = f'Perangkat ditemukan: {len(self.devices)}'
 
     # ── Popup ubah jaringan ──────────────────────────────────────────────
     def _open_network_popup(self, dev):
-        box = BoxLayout(orientation='vertical', padding=10, spacing=8)
-        box.add_widget(_wrapped_label(
-            f"[b]{dev.get('model') or 'Perangkat'}[/b]\n"
-            f"MAC: {dev.get('mac') or '-'}    "
-            f"IP saat ini: {dev.get('ip') or '-'}", markup=True))
+        box = BoxLayout(orientation='vertical', padding=dp(10),
+                        spacing=dp(8))
+        box.add_widget(make_label(
+            f"[b]{dev.get('model') or 'Perangkat Hikvision/EZVIZ'}[/b]",
+            font_size='14sp', markup=True, color='#e0e0e0'))
+        box.add_widget(make_label(
+            f"MAC: {dev.get('mac') or '-'}    IP saat ini: {dev.get('ip') or '-'}",
+            font_size='12sp', color='#aaaaaa'))
 
         dhcp_row = BoxLayout(orientation='horizontal', size_hint_y=None,
-                             height=40)
+                             height=dp(40), spacing=dp(6))
         dhcp_cb = CheckBox(active=bool(dev.get('dhcp')), size_hint_x=None,
-                           width=48)
+                           width=dp(40))
         dhcp_row.add_widget(dhcp_cb)
-        dhcp_row.add_widget(Label(text='DHCP otomatis (IP dari router)',
-                                  halign='left'))
+        dhcp_row.add_widget(make_label(
+            'DHCP otomatis (IP dari router)', font_size='13sp'))
         box.add_widget(dhcp_row)
 
-        ip_in = TextInput(text=dev.get('ip') or '', multiline=False,
-                          size_hint_y=None, height=44,
-                          hint_text='Alamat IPv4 baru')
-        mask_in = TextInput(text=dev.get('mask') or '255.255.255.0',
-                            multiline=False, size_hint_y=None, height=44,
-                            hint_text='Subnet mask')
-        gw_in = TextInput(text=dev.get('gateway') or '', multiline=False,
-                          size_hint_y=None, height=44,
-                          hint_text='Gateway')
+        ip_in = make_input(text=dev.get('ip') or '',
+                           hint='Alamat IPv4 baru')
+        mask_in = make_input(text=dev.get('mask') or '255.255.255.0',
+                             hint='Subnet mask')
+        gw_in = make_input(text=dev.get('gateway') or '', hint='Gateway')
         for widget in (ip_in, mask_in, gw_in):
             box.add_widget(widget)
 
@@ -266,28 +451,34 @@ class IPSetterApp(App):
         dhcp_cb.bind(active=_toggle_dhcp)
         _toggle_dhcp(dhcp_cb, dhcp_cb.active)
 
-        pw_in = TextInput(
-            text='', multiline=False, password=True, size_hint_y=None,
-            height=44,
-            hint_text='Kata sandi admin perangkat '
-                      '(EZVIZ: Verification Code di stiker)')
+        pw_in = make_input(
+            hint='Kata sandi admin perangkat '
+                 '(EZVIZ: Verification Code di stiker)', is_passwd=True)
         box.add_widget(pw_in)
 
-        result_lbl = _wrapped_label(
-            'Catatan: sebagian model/firmware dapat menolak perintah ini; '
-            'balasan perangkat akan ditampilkan apa adanya.')
+        result_lbl = make_label(
+            'Catatan: sebagian model/firmware dapat menolak perintah '
+            'ini; balasan perangkat akan ditampilkan apa adanya.',
+            font_size='11sp', color='#f39c12')
         box.add_widget(result_lbl)
 
         btn_row = BoxLayout(orientation='horizontal', size_hint_y=None,
-                            height=50, spacing=8)
-        cancel_btn = Button(text='Batal')
-        apply_btn = Button(text='Terapkan')
+                            height=dp(50), spacing=dp(8))
+        cancel_btn = Button(
+            text='Batal', font_size='14sp',
+            background_color=get_color_from_hex('#6c757d'),
+            color=get_color_from_hex('#ffffff'))
+        apply_btn = Button(
+            text='Terapkan', font_size='14sp', bold=True,
+            background_color=get_color_from_hex('#28a745'),
+            color=get_color_from_hex('#ffffff'))
         btn_row.add_widget(cancel_btn)
         btn_row.add_widget(apply_btn)
         box.add_widget(btn_row)
 
         popup = Popup(title='Ubah IP / DHCP', content=box,
-                      size_hint=(0.95, 0.92), auto_dismiss=False)
+                      size_hint=(0.95, 0.92), auto_dismiss=False,
+                      background_color=get_color_from_hex('#16213e'))
         cancel_btn.bind(on_release=popup.dismiss)
 
         def _apply(*_):
@@ -311,12 +502,13 @@ class IPSetterApp(App):
                         result_lbl.text = f'{name} tidak valid: {value}'
                         return
                 if not ip:
-                    result_lbl.text = ('Mode statis memerlukan alamat IPv4. '
-                                       'Aktifkan DHCP bila ingin otomatis.')
+                    result_lbl.text = ('Mode statis memerlukan alamat '
+                                       'IPv4. Aktifkan DHCP bila ingin '
+                                       'otomatis.')
                     return
             apply_btn.disabled = True
             cancel_btn.disabled = True
-            result_lbl.text = 'Mengirim perintah ke perangkat…'
+            result_lbl.text = '⏳ Mengirim perintah ke perangkat…'
 
             def _worker():
                 res = sadp_net.apply_network_settings(
@@ -329,14 +521,14 @@ class IPSetterApp(App):
                 cancel_btn.disabled = False
                 if res.get('ok'):
                     result_lbl.text = (
-                        'BERHASIL — perangkat menerima pengaturan baru. '
-                        'Tutup popup ini lalu tekan SCAN untuk memeriksa '
-                        'IP terbarunya.')
+                        '🎉 BERHASIL — perangkat menerima pengaturan '
+                        'baru. Tutup popup ini lalu tekan SCAN untuk '
+                        'memeriksa IP terbarunya.')
                 else:
                     msg = res.get('error') or 'Perintah gagal.'
                     if res.get('result'):
                         msg += f" (Result: {res['result']})"
-                    result_lbl.text = 'GAGAL: ' + msg
+                    result_lbl.text = '❌ GAGAL: ' + msg
 
             threading.Thread(target=_worker, daemon=True).start()
 
