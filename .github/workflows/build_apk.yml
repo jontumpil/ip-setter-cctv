@@ -1,0 +1,147 @@
+name: Build IP Setter CCTV APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # diperlukan untuk membuat Release
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout kode
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependensi sistem
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            git zip unzip wget curl \
+            openjdk-17-jdk \
+            autoconf libtool pkg-config \
+            zlib1g-dev libncurses5-dev libncursesw5-dev \
+            cmake libffi-dev libssl-dev \
+            libltdl-dev gettext lld \
+            build-essential ccache python3-pip python3-venv
+        env:
+          DEBIAN_FRONTEND: noninteractive
+
+      - name: Install Buildozer & Cython
+        run: |
+          pip install --upgrade pip setuptools wheel
+          pip install "cython==0.29.37"
+          pip install buildozer==1.5.0
+
+      - name: Cache Buildozer global (~/.buildozer)
+        uses: actions/cache@v4
+        with:
+          path: ~/.buildozer
+          key: ${{ runner.os }}-buildozer-global-${{ hashFiles('buildozer.spec') }}
+          restore-keys: |
+            ${{ runner.os }}-buildozer-global-
+
+      - name: Cache Buildozer lokal (.buildozer)
+        uses: actions/cache@v4
+        with:
+          path: ./.buildozer
+          key: ${{ runner.os }}-buildozer-local-${{ hashFiles('buildozer.spec') }}
+          restore-keys: |
+            ${{ runner.os }}-buildozer-local-
+
+      - name: Siapkan keystore release
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::error::Secret KEYSTORE_BASE64 belum dipasang (Settings → Secrets and variables → Actions)."
+            exit 1
+          fi
+          echo "$KEYSTORE_B64" | base64 --decode > "$GITHUB_WORKSPACE/ipsetter-release.p12"
+          keytool -importkeystore -noprompt \
+            -srckeystore "$GITHUB_WORKSPACE/ipsetter-release.p12" \
+            -srcstoretype PKCS12 -srcstorepass "$KEYSTORE_PW" \
+            -destkeystore "$GITHUB_WORKSPACE/ipsetter-release.jks" \
+            -deststoretype JKS -deststorepass "$KEYSTORE_PW" -destkeypass "$KEYSTORE_PW"
+          ls -l "$GITHUB_WORKSPACE/ipsetter-release.jks"
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PW: ${{ secrets.KEYSTORE_PASSWORD }}
+
+      - name: Build APK (release, ditandatangani keystore tetap)
+        run: |
+          buildozer -v android release 2>&1 | tee build.log
+        env:
+          JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+          P4A_RELEASE_KEYSTORE: ${{ github.workspace }}/ipsetter-release.jks
+          P4A_RELEASE_KEYSTORE_PASSWD: ${{ secrets.KEYSTORE_PASSWORD }}
+          P4A_RELEASE_KEYALIAS: cctvscanner
+          P4A_RELEASE_KEYALIAS_PASSWD: ${{ secrets.KEYSTORE_PASSWORD }}
+          ANDROID_SDK_ROOT: ${{ github.workspace }}/.buildozer/android/platform/android-sdk
+          APP_ANDROID_ACCEPT_SDK_LICENSE: "1"
+          BUILDOZER_WARN_ON_ROOT: "0"
+
+      - name: Cari APK yang dihasilkan
+        if: always()
+        run: |
+          echo "=== Mencari APK ==="
+          find . -name "*.apk" 2>/dev/null | tee /tmp/apk_list.txt || true
+          if [ ! -s /tmp/apk_list.txt ]; then
+            echo "Tidak ada APK ditemukan."
+            tail -100 build.log || true
+          fi
+
+      - name: Upload APK sebagai artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ip-setter-apk
+          path: bin/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Baca versi dari buildozer.spec
+        if: success()
+        id: get_version
+        run: |
+          VERSION=$(grep '^version\s*=' buildozer.spec | head -1 | awk -F= '{print $2}' | tr -d ' ')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Buat / Update GitHub Release dan upload APK
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.get_version.outputs.version }}
+          name: "IP Setter CCTV v${{ steps.get_version.outputs.version }}"
+          body: |
+            ## IP Setter CCTV v${{ steps.get_version.outputs.version }} — Versi Percobaan
+
+            Aplikasi independen untuk mendeteksi perangkat Hikvision / EZVIZ di jaringan lokal (protokol SADP) dan mengubah parameter jaringannya (DHCP / IP statis) langsung dari HP, tanpa PC.
+
+            ### Perubahan v0.1.0
+            - **Deteksi perangkat** Hikvision/EZVIZ via SADP — termasuk perangkat beda segmen dalam satu jaringan lokal; menampilkan IP, MAC, model, serial, firmware, dan status DHCP
+            - **Ubah IP / DHCP** per perangkat lewat pesan SADP `update` (memerlukan kata sandi admin perangkat; untuk EZVIZ gunakan Verification Code pada stiker perangkat)
+            - **Disclaimer** wajib disetujui sebelum pemakaian pertama
+            - **Versi percobaan berlaku sampai 20 Januari 2027** — setelah tanggal itu aplikasi berhenti berfungsi
+
+            ### Catatan
+            - Bukan produk resmi Hikvision/EZVIZ dan tidak berafiliasi dengan keduanya
+            - Gunakan hanya pada perangkat milik sendiri atau yang Anda berizin mengelolanya
+            - Sebagian model/firmware mungkin menolak perintah ubah jaringan; aplikasi menampilkan balasan perangkat apa adanya
+
+            ### Cara install
+            1. Download file `.apk` di bawah
+            2. Enable *Install dari sumber tidak dikenal* di HP
+            3. Buka file APK → Install
+          files: bin/*.apk
+          prerelease: false
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
